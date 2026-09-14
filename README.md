@@ -41,7 +41,7 @@ pip install -r requirements.txt
 ```
 
 El entorno virtual es opcional; lo único estricto es `iapws==1.5.5`
-(ver [docs/01-propiedades-equilibrio-nh3h2o.md](docs/01-propiedades-equilibrio-nh3h2o.md)).
+(ver [programa/docs/01-propiedades-equilibrio-nh3h2o.md](programa/docs/01-propiedades-equilibrio-nh3h2o.md)).
 
 ## 3. Ejecución
 
@@ -50,7 +50,7 @@ El entorno virtual es opcional; lo único estricto es `iapws==1.5.5`
 Valida el motor de propiedades contra las Tablas 6, 7 y 8 de IAPWS G4-01:
 
 ```bash
-python validacion_g4_01.py
+python programa/validacion_g4_01.py
 ```
 
 Resultado esperado: desviación máxima ≈ `3.85e-03 %`. El único punto que
@@ -60,7 +60,7 @@ dominio del proyecto; el propio script lo explica.
 ### 3.2 Interfaz web
 
 ```bash
-python -m streamlit run app.py
+python -m streamlit run programa/app.py
 ```
 
 Se abre en `http://localhost:8501`. También puedes hacer doble clic en
@@ -76,13 +76,13 @@ Flujo en la interfaz:
 4. **Variables opcionales**: ninguna es obligatoria; si no se declaran, el motor asume una hipótesis y la reporta.
 5. **Ejecutar**: resuelve el producto cartesiano de los barridos.
 
-Los resultados se agregan a `../datos/registro_casos_kalina.xlsx`
+Los resultados se agregan a `datos/registro_casos_kalina.xlsx`
 (un único libro acumulativo para todo el proyecto).
 
 ### 3.3 Pruebas de validación del ciclo
 
 ```bash
-python prueba4.py
+python programa/prueba4.py
 ```
 
 Reproduce un punto publicado de Elsayed et al. (2013) (η = 11.38 %) por el
@@ -91,14 +91,14 @@ método A, con sensibilidades a las hipótesis no publicadas. Tarda ≈ 8 min
 η_Carnot 24.13 % y η_II 46.35 % (publicadas: 24 % y 47 %).
 
 ```bash
-python prueba5.py
+python programa/prueba5.py
 ```
 
 Consistencia cruzada método A ↔ método B sobre el mismo punto, más un control
 que **debe fallar** (demuestra que la prueba discrimina).
 
 ```bash
-python incertidumbre.py
+python programa/incertidumbre.py
 ```
 
 Estudio 1 (capacidad calorífica finita de la fuente) y Estudio 2 (banda ±0.01
@@ -107,22 +107,25 @@ de composición de G4-01). Es el más lento: varios minutos.
 ### 3.4 Benchmark de rendimiento
 
 ```bash
-python benchmark/bench.py
+python programa/benchmark/bench.py
 ```
 
 Mide el arranque (importaciones, parches de `iapws`, primera llamada, costo de
 relanzar un worker) y, por escenario, `resolver()` en frío, en caliente y en un
 punto vecino, además del reparto de tiempo por algoritmo con cProfile. Cada
-medición corre en un proceso limpio. Deja `reporte.md`, los JSON y los `.prof` en
-`benchmark/resultados/<fecha>/`. La corrida completa tarda del orden de una
-hora. La línea base medida y la lista priorizada de optimizaciones están en
-[benchmark/ANALISIS.md](benchmark/ANALISIS.md). Para acotar la corrida:
+medición corre en un proceso limpio. Deja `reporte.md`, los JSON y los `.prof`
+en `programa/benchmark/resultados/<fecha>/`. La corrida completa tarda del
+orden de una hora. La línea base medida y la lista priorizada de optimizaciones
+están en [programa/benchmark/ANALISIS.md](programa/benchmark/ANALISIS.md). Para
+acotar la corrida:
 
 ```bash
-python benchmark/bench.py --escenarios A_elsayed B_kalina --sin-perfil
+python programa/benchmark/bench.py --escenarios A_elsayed B_kalina --sin-perfil
 ```
 
 ### 3.5 Uso como biblioteca
+
+Desde la carpeta `programa/`, o agregándola al `sys.path`:
 
 ```python
 import kalina as k
@@ -176,7 +179,7 @@ app.py ─► motor_ui.py ─► worker_lote.py ─► kalina.py ─► nh3h2o.p
 incertidumbre.py, prueba4.py, prueba5.py ─► kalina.py
 ```
 
-## 5. Índice de la documentación (`docs/`)
+## 5. Índice de la documentación (`programa/docs/`)
 
 Cada documento explica **qué hace** un algoritmo, **la física o matemática que
 aplica** (con sus fórmulas), **cuánto cuesta** y **dónde se puede optimizar**.
@@ -185,15 +188,15 @@ leerlos en orden sigue el camino de una llamada.
 
 | # | Documento | Algoritmo | Física / matemática |
 |---|---|---|---|
-| 01 | [Propiedades y equilibrio NH₃-H₂O](docs/01-propiedades-equilibrio-nh3h2o.md) | Raíz de densidad, burbuja/rocío por sustitución sucesiva + pulido de Newton, parches a `iapws` | Energía de Helmholtz, igualdad de fugacidades, valores K |
-| 02 | [Flash a (T, P) y estado de la mezcla](docs/02-flash-tp-y-estado.md) | `flash_TP` con arranque tibio, `estado` | Equilibrio de fases, regla de la palanca |
-| 03 | [Inversión h→T y s→T](docs/03-inversion-estado-de.md) | `estado_de`: Brent con intervalo memorizado | Monotonía de h(T), s(T); convergencia de Brent |
-| 04 | [Resolución del ciclo KCS-11](docs/04-resolucion-ciclo-kcs11.md) | Lazo exterior (Brent sobre h₁) y lazo frío (punto fijo) | Balances de masa y energía, turbina/bomba isentrópicas, separador |
-| 05 | [Pinzamiento en el HRVG](docs/05-pinzamiento-hrvg.md) | `pinzamiento`: recorte por mínimo acumulado | Contracorriente con capacidad finita, 2.ª ley |
-| 06 | [Condensador con agua finita](docs/06-condensador-capacidad-finita.md) | `perfil_condensador`, `pinzamiento_condensador` | Espejo del HRVG del lado frío |
-| 07 | [Criterios y clasificación](docs/07-criterios-clasificacion.md) | `criterios`, `clasificar` | Carnot, 2.ª ley por equipo, balance global |
-| 08 | [Dimensionamiento a la fuente](docs/08-dimensionamiento-fuente.md) | `dimensionar`: raíces en m_b | Escalado C_g/m_b, rocío ácido |
-| 09 | [Rejilla y ejecución por lotes](docs/09-rejilla-y-ejecucion-lotes.md) | Producto cartesiano, worker persistente, timeout, frontera | Continuación numérica (arranque tibio) |
+| 01 | [Propiedades y equilibrio NH₃-H₂O](programa/docs/01-propiedades-equilibrio-nh3h2o.md) | Raíz de densidad, burbuja/rocío por sustitución sucesiva + pulido de Newton, parches a `iapws` | Energía de Helmholtz, igualdad de fugacidades, valores K |
+| 02 | [Flash a (T, P) y estado de la mezcla](programa/docs/02-flash-tp-y-estado.md) | `flash_TP` con arranque tibio, `estado` | Equilibrio de fases, regla de la palanca |
+| 03 | [Inversión h→T y s→T](programa/docs/03-inversion-estado-de.md) | `estado_de`: Brent con intervalo memorizado | Monotonía de h(T), s(T); convergencia de Brent |
+| 04 | [Resolución del ciclo KCS-11](programa/docs/04-resolucion-ciclo-kcs11.md) | Lazo exterior (Brent sobre h₁) y lazo frío (punto fijo) | Balances de masa y energía, turbina/bomba isentrópicas, separador |
+| 05 | [Pinzamiento en el HRVG](programa/docs/05-pinzamiento-hrvg.md) | `pinzamiento`: recorte por mínimo acumulado | Contracorriente con capacidad finita, 2.ª ley |
+| 06 | [Condensador con agua finita](programa/docs/06-condensador-capacidad-finita.md) | `perfil_condensador`, `pinzamiento_condensador` | Espejo del HRVG del lado frío |
+| 07 | [Criterios y clasificación](programa/docs/07-criterios-clasificacion.md) | `criterios`, `clasificar` | Carnot, 2.ª ley por equipo, balance global |
+| 08 | [Dimensionamiento a la fuente](programa/docs/08-dimensionamiento-fuente.md) | `dimensionar`: raíces en m_b | Escalado C_g/m_b, rocío ácido |
+| 09 | [Rejilla y ejecución por lotes](programa/docs/09-rejilla-y-ejecucion-lotes.md) | Producto cartesiano, worker persistente, timeout, frontera | Continuación numérica (arranque tibio) |
 
 **Resumen de optimizaciones con mayor retorno** (detalle en cada documento):
 
