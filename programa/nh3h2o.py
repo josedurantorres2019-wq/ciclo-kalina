@@ -31,7 +31,16 @@ M_W, M_A = IAPWS95.M, NH3.M
 import inspect as _inspect, textwrap as _tw
 
 _SUBS = {
-    "_phir": [("2*Tc12*1.12455*x**1.12455", "2*Tc12*1.125455*x**1.125455")],
+    "_phir": [
+        ("2*Tc12*1.12455*x**1.12455", "2*Tc12*1.125455*x**1.125455"),
+        # Las instancias de los puros son CONSTANTES dentro de _phir (solo se
+        # usan para llamar a _phir(tau, delta)); construir IAPWS95() y NH3()
+        # en cada llamada es ~159 000 construcciones de MEoS por caso (~7 % del
+        # perfil). Se construyen UNA vez en _aplicar_correcciones() y se
+        # inyectan en el namespace de la funcion.
+        ("    water = IAPWS95()\n", "    water = _WATER\n"),
+        ("    ammonia = NH3()\n", "    ammonia = _AMMONIA\n"),
+    ],
     "_Dphir": [
         ("    firx = dfx*n*delta**d*tau**t\n",
          "    firx = dfx*n*delta**d*tau**t\n    _B = 0.0\n    _C = 0.0\n"),
@@ -47,7 +56,8 @@ _SUBS = {
 
 def _aplicar_correcciones():
     from math import exp
-    ns = {"exp": exp, "IAPWS95": IAPWS95, "NH3": NH3, "H2ONH3": H2ONH3}
+    ns = {"exp": exp, "IAPWS95": IAPWS95, "NH3": NH3, "H2ONH3": H2ONH3,
+          "_WATER": IAPWS95(), "_AMMONIA": NH3()}
     for meth, subs in _SUBS.items():
         src = _tw.dedent(_inspect.getsource(getattr(H2ONH3, meth)))
         src = src.replace("@staticmethod\n", "")

@@ -350,6 +350,19 @@ def C_g_minimo_HRVG(Ts, hs, Tf, dT_pp=0.0):
     return float(np.max(req)) if len(req) else 0.0
 
 
+def _cg_min_hrvg(est, ind, par):
+    """C_g,min del HRVG (kW/K por kg/s de m_b) bajo demanda, sobre la solucion
+    ya resuelta en est/ind y los parametros par. Lo consume solo el TEXTO de
+    supuestos()/criterios(), por eso no esta en el camino caliente de
+    resolver(). Devuelve None si el perfil no se puede evaluar."""
+    try:
+        Ts, hs = perfil_HRVG(par['P_alta'], par['w_b'], est[1]['T'], est[1]['h'],
+                             est[2]['T'], est[2]['h'])
+        return C_g_minimo_HRVG(Ts, hs, par['T_f'], par.get('dT_pp_gas', 0.0))
+    except Exception:
+        return None
+
+
 # ---------------------------------------------------------------------------
 # CONDENSADOR CON AGUA DE CAPACIDAD CALORIFICA FINITA (extension C_cold)
 #
@@ -720,11 +733,10 @@ def resolver(par, devolver_traza=False):
         ind['phi'] = np.inf
         ind['T_gas_out'] = Tf
         ind['eta_recurso'] = 0.0
-        # Diagnostico barato: UNA sola llamada extra sobre la solucion ya
-        # convergida (no dentro del lazo de Brent), asi prueba4/5 no pagan
-        # coste por un dato que no van a declarar.
-        Ts_, hs_ = perfil_HRVG(Ph, wb, e1['T'], h1, e2['T'], e2['h'])
-        ind['Cg_min_HRVG'] = C_g_minimo_HRVG(Ts_, hs_, Tf, dT_pp_gas)
+        # C_g,min es solo INFORMATIVO (lo leen supuestos()/criterios() para
+        # armar texto): se reconstruye bajo demanda con _cg_min_hrvg() y no
+        # se paga el perfil en el camino caliente de resolver().
+        ind['Cg_min_HRVG'] = None
 
     # --- agua de enfriamiento y sus consecuencias ---------------------------
     cp_w = par.get('cp_agua', 4.18)
@@ -796,7 +808,7 @@ def criterios(est, ind, par):
             + ("  [recorte activo]" if ind['pinch_recortado'] else ""))
     else:
         add('S9', True, 'no aplica',
-            f"fuente sin declarar (H10): C_g,min = {ind['Cg_min_HRVG']:.3f} kW/K "
+            f"fuente sin declarar (H10): C_g,min = {_cg_min_hrvg(est, ind, par):.3f} kW/K "
             f"para no cruzar con margen {dT_pp_gas_:.1f} K")
     # O6 -- rocio acido: T_gas,out no puede bajar del punto de rocio acido +
     # margen de diseno. Solo tiene contenido si se declara T_min_gas.
@@ -953,7 +965,7 @@ def supuestos(est, ind, par, calcular_condensador=True):
     if C_g is not None and np.isfinite(C_g):
         add('C_g', True, f"{C_g:.4f} kW/K por kg/s de m_b", "fuente con capacidad finita")
     else:
-        cmin = ind.get('Cg_min_HRVG')
+        cmin = _cg_min_hrvg(est, ind, par)
         add('C_g', False, "fuente isoterma (H10)",
             "eta: sesgo < 0.3 % (Estudio 1; 0.0000 pp medido en la region valida "
             "mientras el pinzamiento no ata). Potencias totales, eta_recurso y "
