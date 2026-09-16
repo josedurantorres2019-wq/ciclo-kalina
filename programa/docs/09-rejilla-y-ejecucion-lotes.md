@@ -40,24 +40,32 @@ aceleran los casos siguientes **dentro del mismo proceso**.
 Producto cartesiano de los valores de cada variable
 (`np.linspace(min, max, n)` si es BARRIDO). N casos = ∏ nᵢ.
 
-### B. Ejecución — [`resolver_grid`](../motor_ui.py#L192)
+### B. Ejecución — [`resolver_grid`](../motor_ui.py#L193)
 
 ```
 pendientes = todos
-mientras haya pendientes:
-    lanzar worker_lote.py con la lista pendiente por stdin (JSON)
-    hilo lector: cada línea de stdout → cola
-    para cada caso esperado:
-        esperar línea con timeout
-        ├─ llegó → registrar, reiniciar cronómetro
-        ├─ timeout → matar proceso, marcar TIEMPO_AGOTADO, relanzar con el resto
-        └─ fin inesperado → marcar ERROR con stderr, relanzar con el resto
+repartir pendientes en K bloques contiguos (K = n_workers)
+lanzar un worker_lote.py por bloque (la rejilla en paralelo)
+por cada worker:
+    hilo lector stdout → eventos a una cola compartida
+    para cada caso esperado de ese worker:
+        esperar linea con timeout (por worker, el deadline mas proximo de todos)
+        ├─ llegó → registrar, avanzar al siguiente caso del bloque
+        ├─ timeout → matar SOLO ese worker, marcar TIEMPO_AGOTADO,
+        │            re-marcar el resto de su bloque como pendiente
+        └─ fin inesperado → marcar ERROR con stderr, re-marcar el resto
+siempre que haya un worker libre y casos pendientes, lanzar el siguiente
 ```
 
-El worker ([`worker_lote.main`](../worker_lote.py#L57)) resuelve en orden, encadena
-`h1_semilla` entre casos OK y escribe una línea JSON con `flush` por caso.
+El worker ([`worker_lote.main`](../worker_lote.py#L57)) resuelve su bloque en orden,
+encadena `h1_semilla` entre casos OK y escribe una línea JSON con `flush` por caso.
 
-Solo se pierde el caché cuando un caso concreto se cuelga.
+La paralelización (`n_workers`, default auto = núcleos − 1) solo pierde el caché de
+un worker cuando un caso CONCRETO de ese bloque se cuelga: los demás siguen
+intactos. La continuidad numérica se preserva porque la rejilla se parte en
+bloques contiguos (la semilla h₁ encadena dentro de cada bloque). Rejillas de
+< 8 casos corren serial (1 worker): el arranque frío pesa más que el paralelismo
+en rejillas chicas.
 
 ### C. SELECCION — [`aplicar_seleccion`](../motor_ui.py#L361)
 
@@ -79,10 +87,10 @@ Lee el libro completo, concatena las filas nuevas y lo reescribe.
 
 | Oportunidad | Detalle | Esfuerzo |
 |---|---|---|
-| **Paralelismo con K workers** | Cada proceso tiene su propio caché: es seguro repartir la rejilla en K bloques contiguos (K = núcleos − 1), cada uno con su `worker_lote.py`. Speed-up ≈ K en rejillas grandes | Medio |
+| **Paralelismo con K workers** | ✅ **HECHO**. Cada bloque contiguo corre en su propio `worker_lote.py` (`resolver_grid(n_workers=...)`); timeout y reinicio por worker, stderr drenado en thread (sin bloqueo de pipe) | Hecho |
 | **Orden serpenteante** | `itertools.product` salta del último valor de una fila al primero de la siguiente: la semilla h₁ queda lejos justo ahí. Recorrer en *boustrophedon* (invertir el sentido de la variable interna en cada fila) mantiene todos los vecinos adyacentes | Bajo |
 | **Semilla del vecino, no del anterior** | En rejillas 2D+ el caso previo en la lista no siempre es el vecino más próximo. Guardar h₁ por índice de rejilla y sembrar con el vecino ya resuelto más cercano | Medio |
-| **Riesgo de bloqueo por `stderr`** | El worker se lanza con `stderr=PIPE` pero `stderr` no se lee hasta que el proceso termina. Si escribe más que el búfer del pipe (≈ 4–64 KB; p. ej. muchos `RuntimeWarning` de numpy/scipy), el worker se bloquea y el caso termina en un **TIEMPO_AGOTADO falso**. Leer stderr en otro hilo o redirigirlo a un archivo | Bajo |
+| **Riesgo de bloqueo por `stderr`** | ✅ **HECHO**: `resolver_grid` drena `stderr` en un thread por worker (buf en memoria, no `PIPE` sin leer), así un exceso de mensajes no bloquea al proceso ni produce TIEMPO_AGOTADO falso | Hecho |
 | **Excel incremental** | `guardar_en_excel` es O(filas totales) por guardado y crece sin fin. Usar `openpyxl` en modo *append* sobre la hoja, o un CSV/Parquet de trabajo que se exporte a Excel bajo demanda | Bajo |
 | **Relanzar tras crash** | Tras un fin inesperado se marca ERROR solo el caso en curso y se relanza; si el crash es sistemático (p. ej. importación fallida) se relanza N veces. Abortar si el worker muere sin producir ninguna línea dos veces seguidas | Bajo |
 | **`pendientes.remove(i)`** | O(n) por caso, O(n²) total; irrelevante hasta miles de casos, pero un `set` o un índice lo resuelve | Trivial |

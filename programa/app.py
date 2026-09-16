@@ -7,6 +7,7 @@ combinacion de la rejilla, y presenta/registra el resultado.
 Ejecutar con:
     streamlit run app.py
 """
+import os
 import sys
 import time
 from pathlib import Path
@@ -81,6 +82,16 @@ with st.sidebar:
         "Calcular tambien el diagnostico del condensador (C_cold minimo)",
         value=False,
         help="Una pasada extra de evaluacion de estado() por caso -- mas lento.",
+    )
+    max_workers = max(1, (os.cpu_count() or 1) - 1)
+    n_workers = st.number_input(
+        "Procesos en paralelo", min_value=1, max_value=max(max_workers, 8),
+        value=max_workers,
+        help=(
+            "La rejilla se parte en bloques contiguos, cada uno resuelto por un "
+            "proceso worker_lote con su propio cache e h1_semilla encadenada "
+            "(doc 09). Speed-up ~= procesos en rejillas grandes; 1 = serial."
+        ),
     )
     guardar_auto = st.checkbox(
         "Guardar en Excel automaticamente al terminar", value=True,
@@ -188,9 +199,10 @@ if ejecutar:
     else:
         combos = mu.construir_grid(specs)
         st.caption(
-            "Corriendo toda la rejilla en un proceso compartido (conserva el cache "
-            "interno de kalina.py entre casos -- solo se pierde y se reinicia si un "
-            "caso concreto se cuelga mas alla del tiempo limite)."
+            f"Corriendo {len(combos)} caso(s) en {n_workers} proceso(s) en paralelo: "
+            "cada worker_lote conserva su cache interno de kalina.py y su cadena "
+            "de h1_semilla dentro de su bloque contiguo (solo se pierde y se "
+            "reinicia el worker de un caso que se cuelga mas alla del tiempo limite)."
         )
         barra = st.progress(0.0)
         estado_txt = st.empty()
@@ -198,18 +210,20 @@ if ejecutar:
         filas = [None] * len(combos)
         detalle = [None] * len(combos)
         t_total0 = time.time()
+        t_terminados = [0]
 
         def _on_caso(i, resultado, dt):
             filas[i] = mu.fila_de_caso(pares[i], combos[i]["m_b"], resultado, modo, dt)
             detalle[i] = dict(par=pares[i], m_b=combos[i]["m_b"], resultado=resultado)
-            barra.progress((i + 1) / len(combos))
+            t_terminados[0] += 1
+            barra.progress(t_terminados[0] / len(combos))
             estado_txt.caption(
-                f"Caso {i + 1}/{len(combos)} (id {i}) -- {resultado['estado']} -- "
+                f"Caso {t_terminados[0]}/{len(combos)} -- id {i} -- {resultado['estado']} -- "
                 f"{dt:.1f} s (transcurrido: {time.time() - t_total0:.0f} s)"
             )
 
         mu.resolver_grid(pares, timeout=timeout, calcular_condensador=calcular_condensador,
-                         on_caso=_on_caso)
+                         on_caso=_on_caso, n_workers=int(n_workers))
         df = pd.DataFrame(filas)
         st.session_state["df_resultados"] = df
         st.session_state["casos_detalle"] = detalle

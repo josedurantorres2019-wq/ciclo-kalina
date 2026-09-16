@@ -5,18 +5,20 @@ resolver()/criterios()/clasificar()/supuestos() sobre una rejilla de casos
 (producto cartesiano de las variables declaradas BARRIDO) y empaqueta el
 resultado para la tabla en pantalla y el registro en Excel.
 
-Cada caso corre en un PROCESO propio via subprocess (worker_caso.py), no en un
-hilo ni via multiprocessing.Process: kalina.py mantiene cache a nivel de
-modulo (_puros, _flash, _env, _ultimaT) sin locks, pensada para un solo hilo
-de ejecucion, asi que correr casos concurrentes en el mismo proceso
-arriesgaria corromperlas. subprocess (en vez de multiprocessing con metodo
-'spawn') evita ademas que Windows reimporte el script de Streamlit como si
-fuera el worker -- ver docstring de worker_caso.py. El proceso aislado
-tambien es lo que permite cancelar de verdad un caso que se cuelga en la
-region cara conocida (6-8 kg/s de gas, ver decisiones-codigo-kalina.md C27).
+Cada caso corre en un PROCESO propio via subprocess (worker_caso.py o
+worker_lote.py), no en un hilo ni via multiprocessing.Process: kalina.py
+mantiene cache a nivel de modulo (_puros, _flash, _env, _ultimaT) sin locks,
+pensada para un solo hilo de ejecucion, asi que correr casos concurrentes en
+el mismo proceso arriesgaria corromperlas. subprocess (en vez de
+multiprocessing con metodo 'spawn') evita ademas que Windows reimporte el
+script de Streamlit como si fuera el worker -- ver docstring de worker_caso.py.
+El proceso aislado tambien es lo que permite cancelar de verdad un caso que se
+cuelga en la region cara conocida (6-8 kg/s de gas, ver
+decisiones-codigo-kalina.md C27).
 """
 import itertools
 import json
+import os
 import queue
 import subprocess
 import sys
@@ -189,92 +191,184 @@ def _empaquetar_salida(salida):
                 mensaje=salida.get("mensaje", ""), traceback=salida.get("traceback", ""))
 
 
-def resolver_grid(pares, timeout=90, calcular_condensador=False, on_caso=None):
-    """Resuelve una lista de `par` en el MENOR numero posible de procesos, para
-    conservar el cache interno de kalina.py entre casos (ver worker_lote.py).
+def resolver_grid(pares, timeout=90, calcular_condensador=False, on_caso=None,
+                  n_workers=None):
+    """Resuelve una lista de `par` repartida en `n_workers` procesos
+    worker_lote.py en paralelo, cada uno con su propio cache interno de
+    kalina.py y su cadena de h1_semilla dentro de su bloque contiguo (doc 09,
+    "Paralelismo con K workers").
 
-    Corre todo el tramo pendiente en un proceso persistente (worker_lote.py);
-    si un caso concreto no produce su linea de resultado dentro de `timeout`
-    segundos, se mata ese proceso (perdiendo el cache acumulado, inevitable:
-    no hay forma de cancelar una sola llamada C-bound dentro de un proceso
-    vivo), se marca ese caso como TIEMPO_AGOTADO, y se arranca un proceso
-    NUEVO para los casos restantes -- asi el resto de la rejilla sigue
-    aprovechando cache entre si, y solo se paga el reinicio en el caso
-    realmente atascado.
+    La rejilla se parte en bloques CONTIGUOS para preservar la continuidad
+    numerica: la semilla h1 de un caso se alimenta con la del anterior dentro
+    del mismo proceso, igual que el camino serial. Los bloques cruzan solo en
+    la frontera.
 
-    `on_caso(i, resultado, duracion_s)` se llama, si se da, apenas se conoce
-    el resultado del caso `i` (para actualizar una barra de progreso).
+    Si un caso se cuelga mas de `timeout` segundos en un worker, se mata ese
+    worker (los demas siguen con cache intacto), se marca ese caso
+    TIEMPO_AGOTADO, y el resto de su bloque se relanza en un proceso nuevo. Un
+    worker que termina inesperadamente (crash) marca ERROR en el caso en curso
+    y redistribuye el resto igual.
+
+    `n_workers=None` usa auto-deteccion: min(K, n_casos) con K = cores - 1
+    (minimo 1). `n_workers=1` reproduce el camino serial anterior. Las
+    rejillas de < 8 casos corren con 1 worker (un arranque frio extra pesa mas
+    que el paralelismo en rejillas chicas).
+
+    El timeout aplica POR CASO esperado dentro de cada worker, igual que
+    antes. `on_caso(i, resultado, duracion_s)` se llama apenas se conoce el
+    resultado del caso `i`; en paralelo el orden de llegada no es el orden de
+    la lista.
     """
     n = len(pares)
+    if n == 0:
+        return []
+
+    if n_workers is None:
+        cores = os.cpu_count() or 1
+        n_workers = max(1, min(cores - 1, n)) if n >= 8 else 1
+    else:
+        n_workers = max(1, min(int(n_workers), n))
+
     resultados = [None] * n
     pendientes = list(range(n))
-    while pendientes:
+    activos = {}
+    cola = queue.Queue()
+    _wid_seq = [0]
+    completados = [0]
+
+    # -- helpers internos ---------------------------------------------------
+
+    def _lanzar_worker(casos):
+        wid = _wid_seq[0]
+        _wid_seq[0] += 1
         proc = subprocess.Popen(
             [sys.executable, str(WORKER_LOTE_SCRIPT)],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, bufsize=1,
         )
-        lote = list(pendientes)
         entrada = json.dumps([dict(par=pares[i], calcular_condensador=calcular_condensador)
-                              for i in lote])
+                              for i in casos])
         proc.stdin.write(entrada)
         proc.stdin.close()
 
-        colas = queue.Queue()
+        stderr_buf = []
 
-        def _leer(stream=proc.stdout, destino=colas):
+        def _leer_stderr(stream=proc.stderr, destino=stderr_buf):
             for linea in stream:
-                destino.put(("linea", linea))
-            destino.put(("fin", None))
+                destino.append(linea)
 
-        hilo = threading.Thread(target=_leer, daemon=True)
-        hilo.start()
+        h_stderr = threading.Thread(target=_leer_stderr, daemon=True)
+        h_stderr.start()
 
-        t_inicio_caso = time.time()
-        j = 0  # indice dentro de `lote`
-        while j < len(lote):
-            try:
-                tipo, payload = colas.get(timeout=timeout)
-            except queue.Empty:
-                proc.kill()
-                proc.wait()
-                i_real = lote[j]
-                resultados[i_real] = dict(estado="TIEMPO_AGOTADO",
-                                          mensaje=f"excedio {timeout} s sin resolver")
-                pendientes.remove(i_real)
-                if on_caso:
-                    on_caso(i_real, resultados[i_real], timeout)
-                j += 1
-                break
-            if tipo == "fin":
-                # el proceso termino antes de lo esperado (crash). El caso en
-                # curso y los que quedaban en este lote se reintentan en un
-                # proceso nuevo, salvo que tambien haya terminado sin mas
-                # salida que ofrecer -- entonces se marcan como ERROR.
-                proc.wait()
-                if j < len(lote):
-                    i_real = lote[j]
-                    err = proc.stderr.read()
-                    resultados[i_real] = dict(
-                        estado="ERROR",
-                        mensaje="el proceso worker termino sin resolver este caso",
-                        traceback=err,
-                    )
-                    pendientes.remove(i_real)
-                    if on_caso:
-                        on_caso(i_real, resultados[i_real],
-                               time.time() - t_inicio_caso)
-                break
-            i_real = lote[j]
-            dt = time.time() - t_inicio_caso
-            resultados[i_real] = _empaquetar_salida(json.loads(payload))
-            pendientes.remove(i_real)
+        state = dict(proc=proc, casos=list(casos), j=0, t0=time.time(),
+                     stderr_buf=stderr_buf, h_stderr=h_stderr, dead=False)
+        activos[wid] = state
+
+        def _leer_stdout(stream=proc.stdout, destino=cola, _wid=wid):
+            for linea in stream:
+                destino.put(("line", _wid, linea))
+            destino.put(("fin", _wid, None))
+
+        threading.Thread(target=_leer_stdout, daemon=True).start()
+        return wid
+
+    def _matar_worker(wid):
+        w = activos[wid]
+        w["proc"].kill()
+        w["proc"].wait()
+        w["h_stderr"].join(timeout=2)
+        w["dead"] = True
+
+    def _marcar_tiempo_agotado(wid):
+        w = activos[wid]
+        if w["j"] >= len(w["casos"]):
+            _matar_worker(wid)
+            return
+        idx = w["casos"][w["j"]]
+        resultados[idx] = dict(estado="TIEMPO_AGOTADO",
+                               mensaje=f"excedio {timeout} s sin resolver")
+        completados[0] += 1
+        if on_caso:
+            on_caso(idx, resultados[idx], timeout)
+        leftover = w["casos"][w["j"] + 1:]
+        _matar_worker(wid)
+        if leftover:
+            pendientes[0:0] = leftover
+
+    def _marcar_error(wid):
+        w = activos[wid]
+        if w["j"] < len(w["casos"]):
+            idx = w["casos"][w["j"]]
+            w["h_stderr"].join(timeout=2)
+            err = "".join(w["stderr_buf"])
+            resultados[idx] = dict(
+                estado="ERROR",
+                mensaje="el proceso worker termino sin resolver este caso",
+                traceback=err,
+            )
+            completados[0] += 1
             if on_caso:
-                on_caso(i_real, resultados[i_real], dt)
-            t_inicio_caso = time.time()
-            j += 1
+                on_caso(idx, resultados[idx], time.time() - w["t0"])
+            leftover = w["casos"][w["j"] + 1:]
+            if leftover:
+                pendientes[0:0] = leftover
+        _matar_worker(wid)
+
+    def _despachar():
+        while pendientes:
+            alive = sum(1 for w in activos.values() if not w["dead"])
+            if alive >= n_workers:
+                break
+            slots = n_workers - alive
+            chunk_size = max(1, -(-len(pendientes) // slots))
+            chunk = pendientes[:chunk_size]
+            del pendientes[:chunk_size]
+            _lanzar_worker(chunk)
+
+    # -- bucle principal -----------------------------------------------------
+
+    _despachar()
+
+    while completados[0] < n:
+        ahora = time.time()
+        deadlines = [w["t0"] + timeout for w in activos.values() if not w["dead"]]
+        if deadlines:
+            wait = max(0.0, min(deadlines) - ahora)
         else:
-            proc.wait(timeout=5)
+            wait = 0.0
+
+        try:
+            tipo, wid, payload = cola.get(timeout=wait)
+        except queue.Empty:
+            ahora2 = time.time()
+            for wid, w in list(activos.items()):
+                if not w["dead"] and ahora2 - w["t0"] >= timeout:
+                    _marcar_tiempo_agotado(wid)
+            _despachar()
+            continue
+
+        if wid not in activos or activos[wid]["dead"]:
+            continue
+
+        w = activos[wid]
+
+        if tipo == "fin":
+            _marcar_error(wid)
+            _despachar()
+        else:
+            idx = w["casos"][w["j"]]
+            resultados[idx] = _empaquetar_salida(json.loads(payload))
+            completados[0] += 1
+            if on_caso:
+                on_caso(idx, resultados[idx], time.time() - w["t0"])
+            w["j"] += 1
+            if w["j"] < len(w["casos"]):
+                w["t0"] = time.time()
+            else:
+                w["proc"].wait(timeout=5)
+                w["dead"] = True
+                _despachar()
+
     return resultados
 
 
