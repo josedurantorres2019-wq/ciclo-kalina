@@ -105,8 +105,8 @@ esfuerzo/ganancia; 1a es la de mayor ganancia.
 
 | # | Cambio | Qué ataca | Esfuerzo |
 |---|---|---|---|
-| 2a | Jacobiano analítico en `flash_TP` (o Newton 2×2 explícito) | 4.7–7.6 evaluaciones de F por flash, la mayoría para el Jacobiano | Alto |
-| 2b | Semilla **interpolada** entre los dos flashes vecinos de la tabla | Reintentos con Raoult (fsolve > flash en B) | Bajo |
+| 2a | Jacobiano analítico en `flash_TP` (o Newton 2×2 explícito) | ~3.7 evaluaciones de F por flash (2b ya implementada), la mayoría para el Jacobiano | Alto |
+| 2b | Semilla **interpolada** entre los dos flashes vecinos de la tabla | Reintentos con Raoult (fsolve > flash en B) | Bajo · **HECHA (2b)**: B_base -19 % FRIO, -18 % vecino |
 | 2c | Devolver desde el flash las densidades de la última evaluación y reutilizarlas en `_mono` | `_mono`: 7–15 % | Medio |
 
 ### Prioridad 3 — inversión y lazos (`kalina.py`, docs 03–06)

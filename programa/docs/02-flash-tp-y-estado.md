@@ -59,13 +59,19 @@ $$
 2. **Tabla por presión:** `_flash[P]` es una lista ordenada por T de soluciones
    ya obtenidas. Búsqueda binaria (`bisect`); si T ya está, se devuelve.
 3. **Arranques**, en orden:
-   - *tibio*: la solución de la T vecina más cercana en la tabla;
+   - *tibio interpolado* (2b): si la tabla tiene soluciones a **ambos** lados de
+     T, interpola x_L, x_V linealmente entre los dos vecinos — la campana
+     zeotrópica es casi lineal en T a P fija, la semilla queda mucho más cerca
+     y `fsolve` converge en ~1-2 iteraciones en vez de ~3;
+   - *tibio*: solo un vecino disponible → usa el más cercano;
    - *respaldo*: Raoult, x_L = (P − p_W)/(p_A − p_W), x_V = x_L·p_A/P.
 4. `fsolve(xtol=1e-12)`; se acepta solo si converge y 0 < x_L < x_V < 1.
 5. Inserta la solución en la tabla (`bisect.insort`).
 
-Según el comentario del código, el arranque tibio baja las iteraciones de
-`fsolve` de ~9 a ~3.
+El arranque tibio baja las iteraciones de `fsolve` de ~9 a ~3; la interpolación
+(2b, implementada 2026-09-16) la baja a ~1-2 y reduce los reintentos con Raoult.
+En B_base (barrido con tabla grande): FRIO 46.8 → 37.7 s (-19 %), vecino
+34.3 → 28.1 s (-18 %). Resultado en el PLAN_OPTIMIZACION.
 
 ### `estado(T, P, w)`
 
@@ -87,7 +93,7 @@ por diferencias finitas. Un flash nuevo cuesta ≈ (3 iteraciones + Jacobiano) �
 |---|---|---|
 | **Jacobiano analítico** | ∂ln φᵢ/∂x se obtiene de las segundas derivadas de Φʳ. Pasar `fprime` a `fsolve` o escribir Newton 2×2 explícito elimina las evaluaciones por diferencias finitas (≈ 2 de cada 3) | Alto |
 | **Reconstrucción de `Ts` en cada llamada** | [`Ts = [r[0] for r in tabla]`](../kalina.py#L52) es O(n) por llamada y la tabla crece con el barrido. Mantener una lista paralela de T ordenada o usar `sortedcontainers` | Bajo |
-| **Interpolación en lugar de solo semilla** | Si hay soluciones a ambos lados de T, interpolar x_L, x_V linealmente da una semilla mucho más cercana (a menudo converge en 1 iteración) | Bajo |
+| **Interpolación en lugar de solo semilla** | Si hay soluciones a ambos lados de T, interpolar x_L, x_V linealmente da una semilla mucho más cercana (a menudo converge en 1 iteración) | Bajo | **HECHO (2b)**: B_base -19 % FRIO, -18 % vecino |
 | **Tablas sin límite** | `_flash`, `_puros`, `_env`, `_ultimaT` crecen sin tope. En un proceso persistente (worker de lote) conviene un LRU por clave de presión | Bajo |
 | **Densidades de la iteración anterior** | Dentro de `fsolve` las composiciones cambian poco: sembrar `rho_TPx` con la última densidad por fase | Medio |
 | **Evaluación duplicada en `estado`** | En la rama bifásica `_mono(T,P,xL,'l')` y `_mono(T,P,xV,'v')` recalculan densidades que el propio flash ya obtuvo en su última evaluación de F; devolverlas desde el flash ahorra 2 raíces + 2 `prop` por llamada | Medio |

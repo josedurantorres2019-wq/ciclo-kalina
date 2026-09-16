@@ -135,7 +135,7 @@ reparto se achato. El otro hot path es ahora la SECUENCIA de llamadas
 NUMERO de evaluaciones: Jacobiano explicito en flash_TP (fase 2a) para
 fsolve -> menos F por flash, y semilla interpolada (2b). Para un barrido de
 muchos ciclos, la palanca ortogonal es paralelizar la rejilla en K procesos
-worker_lote (doc 09, no implementado aun).
+worker_lote (doc 09, HECHO 2026-09-16: `resolver_grid(n_workers=...)`).
 
 Dato de barrido: B_base vecino sigue costando 34.3 s (solo -61 % vs 2015):
 en un barrido con T_f creciente casi ningun flash acierta el cache (que
@@ -244,12 +244,31 @@ evaluacion extra por iteracion). Mismo criterio que Fase 3.
 > (B, -80 %); MEoS._phir baja de 96 994 a 6 202 llamadas/caso. Resultado
 > completo en la seccion "Resultado (fase 1a implementada, 2026-09-16)".
 
+## Fase 2b — Semilla interpolada en `flash_TP` — HECHA
+
+> Implementada 2026-09-16 (kalina.py, `flash_TP`). Cuando la tabla `_flash[P]`
+> ya tiene soluciones a ambos lados de T, interpola x_L/x_V linealmente entre
+> los dos vecinos en vez de usar el mas proximo (la campana zeotropica es casi
+> lineal en T a P fija). Efecto medido (bench.py, 20260916_114435):
+>
+> | Escenario | post-1a | +2b | Ganancia |
+> |---|---|---:|---:|
+> | A_elsayed FRIO | 4.8 s | 4.75 s | -1 % |
+> | A_elsayed vecino | 4.1 s | 3.9 s | -5 % |
+> | B_base FRIO | 46.8 s | 37.7 s | **-19 %** |
+> | B_base vecino | 34.3 s | 28.1 s | **-18 %** |
+>
+> Las evaluaciones de F por flash bajan de ~4.7-7.6 a ~3.7 (A_elsayed). En
+> B_base se mantienen ~296 reintentos con Raoult (fsolve 1817 vs 1521 flashes).
+> La ganancia es mayor donde la tabla es grande (barridos).
+
 ## Fase 5 — (fuera de alcance por ahora) 2a
 
 - 2a: Jacobiano analitico en `flash_TP` (Newton 2x2 explicito o Jacobiano
   via derivacion implicita de rho_TPx) para resolver el par (xL, xV).
-  fsolve hoy hace ~4 evaluaciones de F por flash; un Newton con semilla
-  interpolada (2b) podria bajar a ~2. Es la siguiente palanca por caso.
+  fsolve hoy hace ~3.7 evaluaciones de F por flash (2b implementada); un
+  Newton con Jacobiano explicito podria bajar a ~2. Es la siguiente palanca
+  por caso, con esfuerzo ALTO.
 
 ## Protocolo de verificacion obligatorio (en cada fase)
 

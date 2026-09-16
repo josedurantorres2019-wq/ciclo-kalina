@@ -37,8 +37,9 @@ def flash_TP(T, P):
 
     Resuelve la igualdad de fugacidades de los dos componentes. Es el mismo
     equilibrio que bubbleP/dewP de nh3h2o, pero parametrizado por (T,P), que es
-    como lo necesita el ciclo. Arranque tibio con el flash previo mas cercano en
-    T a la misma presion: reduce las iteraciones de fsolve de ~9 a ~3.
+    como lo necesita el ciclo. Arranque tibio: si la tabla ya tiene soluciones
+    a ambos lados de T, interpola xL/xV linealmente (semilla mucho mas cercana,
+    1-2 iteraciones de fsolve); si solo hay un vecino, usa el mas proximo.
     """
     Ta, Tw = Tsat_puros(P)
     # Banda de guarda de 0.3 K junto a los puros: alli la ventana bifasica en
@@ -56,11 +57,19 @@ def flash_TP(T, P):
     pa, pw = ng.Psat_pure(T)
     raoult = (float(np.clip((P - pw) / (pa - pw), 1e-4, 1 - 1e-4)),)
     raoult = (raoult[0], float(np.clip(raoult[0] * pa / P, 1e-4, 1 - 1e-4)))
-    cand = [tabla[j] for j in (i - 1, i) if 0 <= j < len(tabla)]
+    vecinos = [tabla[j] for j in (i - 1, i) if 0 <= j < len(tabla)]
     arranques = []
-    if cand:
-        _, xL0, xV0 = min(cand, key=lambda r: abs(r[0] - T))
-        arranques.append((xL0, xV0))          # arranque tibio
+    if len(vecinos) == 2 and vecinos[0][0] <= T <= vecinos[1][0]:
+        # Hay soluciones a ambos lados de T: interpolar xL, xV linealmente
+        # da una semilla mucho mas cercana que el vecino unico (converge en
+        # 1-2 iteraciones en vez de ~3 y evita el reintento con Raoult).
+        t0, xL0, xV0 = vecinos[0]
+        t1, xL1, xV1 = vecinos[1]
+        w = (T - t0) / (t1 - t0)
+        arranques.append((xL0 + w * (xL1 - xL0), xV0 + w * (xV1 - xV0)))
+    elif vecinos:
+        _, xL0, xV0 = min(vecinos, key=lambda r: abs(r[0] - T))
+        arranques.append((xL0, xV0))          # arranque tibio (vecino unico)
     arranques.append(raoult)                  # respaldo: inicializacion de Raoult
 
     def F(v):
