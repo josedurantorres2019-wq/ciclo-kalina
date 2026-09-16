@@ -4,6 +4,7 @@ correcciones aplicadas a la derivada composicional. Validado contra las Tablas
 6, 7 y 8 de la guia IAPWS G4-01. Composicion x = fraccion MOLAR de amoniaco.
 Presiones en MPa, T en K, h y s en base masica (kJ/kg, kJ/kg-K)."""
 import numpy as np
+from math import exp
 from scipy.optimize import brentq, fsolve
 from iapws.ammonia import H2ONH3, NH3
 from iapws.iapws95 import IAPWS95
@@ -90,11 +91,180 @@ def prop(rho_mol, T, x):
     r["rho_mol"] = rho_mol
     return r
 
+# ---------------------------------------------------------------------------
+# P_of ESPECIALIZADO
+#
+# El hot path del motor es P_of (45 396 llamadas/caso): cada una invoca
+# H2ONH3._phir COMPLETO, que pide a cada puro MEoS._phir (seis derivadas) y a
+# _Dphir (siete derivadas). Para P = Z*R*T*rho solo hace falta
+# fird = dPhi_r/ddelta. Estas funciones replican EXACTAMENTE ese unico termino
+# (mismos terminos, mismo orden de operaciones, por lo que el valor coincide
+# con el de _phir), podando todo lo que P_of no consume: ~90 % menos de
+# aritmetica por evaluacion de presion, que es el grueso del tiempo por caso.
+# La red golden master no deberia moverse ni en el ruido.
+# ---------------------------------------------------------------------------
+def _mk_fird_puro(const):
+    """Devuelve la funcion fird(tau, delta) de UN componente puro a partir de
+    sus constantes (IAPWS-95 o NH3). Equivale a MEoS._phir podado a fird."""
+    nr1, d1, t1 = const.get("nr1", []), const.get("d1", []), const.get("t1", [])
+    nr2, d2, t2 = const.get("nr2", []), const.get("d2", []), const.get("t2", [])
+    g2, c2 = const.get("gamma2", []), const.get("c2", [])
+    nr3, d3, t3 = const.get("nr3", []), const.get("d3", []), const.get("t3", [])
+    a3 = const.get("alfa3", []); e3 = const.get("epsilon3", [])
+    b3 = const.get("beta3", []); g3 = const.get("gamma3", [])
+    nr4, a4, b4 = const.get("nr4", []), const.get("a4", []), const.get("b4", [])
+    A4, B4, C4, D4 = const.get("A", []), const.get("B", []), const.get("C", []), const.get("D", [])
+    bt4 = const.get("beta4", [])
+
+    def fird(tau, delta):
+        fird = 0.0
+        for n, d, t in zip(nr1, d1, t1):
+            fird += n*d*delta**(d-1)*tau**t
+        for n, d, g, t, c in zip(nr2, d2, g2, t2, c2):
+            fird += n*exp(-g*delta**c)*delta**(d-1)*tau**t*(d-g*c*delta**c)
+        for n, d, t, a, e, b, g in zip(nr3, d3, t3, a3, e3, b3, g3):
+            p = n*delta**d*tau**t*exp(-a*(delta-e)**2-b*(tau-g)**2)
+            fird += p*(d/delta-2*a*(delta-e))
+        for n, a, b, A, B, C, D, bt in zip(nr4, a4, b4, A4, B4, C4, D4, bt4):
+            tita = (1-tau)+A*((delta-1)**2)**(0.5/bt)
+            F = exp(-C*(delta-1)**2-D*(tau-1)**2)
+            Fd = -2*C*F*(delta-1)
+            Delta = tita**2+B*((delta-1)**2)**a
+            if Delta == 0:
+                DeltaBd = 0.0
+            else:
+                Deltad = (delta-1)*(A*tita*2/bt*((delta-1)**2)**(0.5/bt-1)
+                                    + 2*B*a*((delta-1)**2)**(a-1))
+                DeltaBd = b*Delta**(b-1)*Deltad
+            fird += n*(Delta**b*(F+delta*Fd)+DeltaBd*delta*F)
+        return fird
+    return fird
+
+_WATER_FIRD = _mk_fird_puro(IAPWS95._constants)
+_AMMONIA_FIRD = _mk_fird_puro(NH3._constants)
+
+# Coeficientes del termino de mezcla (departure, Eq 8 de G4-01): _Dphir podado
+# a fird. Los tres grupos y el termino x^2 final, en el MISMO orden que _Dphir.
+_DEP_NR1 = (-1.855822e-2,)
+_DEP_D1 = (4,)
+_DEP_T1 = (1.5,)
+_DEP_NR2 = (5.258010e-2, 3.552874e-10, 5.451379e-6, -5.998546e-13, -3.687808e-6)
+_DEP_D2 = (5, 15, 12, 12, 15)
+_DEP_T2 = (0.5, 6.5, 1.75, 15, 6)
+_DEP_C2 = (1, 1, 1, 1, 2)
+_DEP_NR3 = (0.2586192, -1.368072e-8, 1.226146e-2, -7.181443e-2, 9.970849e-2,
+            1.0584086e-3, -0.1963687)
+_DEP_D3 = (4, 15, 4, 5, 6, 10, 6)
+_DEP_T3 = (-1, 4, 3.5, 0, -1, 8, 7.5)
+_DEP_C3 = (1, 1, 1, 1, 2, 2, 2)
+
+
+def _fird_departure(tau, delta, x):
+    fx = x*(1-x**0.5248379)
+    fird = _DEP_NR1[0]*_DEP_D1[0]*delta**(_DEP_D1[0]-1)*tau**_DEP_T1[0]
+    for n, d, t, c in zip(_DEP_NR2, _DEP_D2, _DEP_T2, _DEP_C2):
+        fird += n*exp(-delta**c)*delta**(d-1)*tau**t*(d-c*delta**c)
+    for n, d, t, c in zip(_DEP_NR3, _DEP_D3, _DEP_T3, _DEP_C3):
+        fird += x*n*exp(-delta**c)*delta**(d-1)*tau**t*(d-c*delta**c)
+    fird += x**2*(-0.7777897)*exp(-delta**2)*delta**(2-1)*tau**4*(2-2*delta**2)
+    return fird*fx
+
+
+def _delta_fird(rho, T, x):
+    """(delta, fird) de la MEZCLA. delta = rho/rhon como en _phir; fird =
+    (1-x)*fird_agua + x*fird_amon + fird_mezcla. Mismas expresiones y orden de
+    operaciones que H2ONH3._phir para conservar el valor exacto."""
+    Tc12 = 0.9648407/2*(IAPWS95.Tc+NH3.Tc)
+    Tn = (1-x)**2*IAPWS95.Tc + x**2*NH3.Tc + 2*x*(1-x**1.125455)*Tc12
+    b = 0.8978069
+    rhoc1m = IAPWS95.rhoc/(IAPWS95.M/1000)
+    rhoc2m = NH3.rhoc/(NH3.M/1000)
+    M = (1-x)*IAPWS95.M + x*NH3.M
+    rhoc12 = 1/(1.2395117/2*(1/rhoc1m + 1/rhoc2m))
+    rhonm = 1/((1-x)**2/rhoc1m + x**2/rhoc2m + 2*x*(1-x**b)/rhoc12)
+    rhon = rhonm*M/1000
+    tau = Tn/T
+    delta = rho/rhon
+    fird = (1-x)*_WATER_FIRD(tau, delta) + x*_AMMONIA_FIRD(tau, delta) \
+           + _fird_departure(tau, delta, x)
+    return delta, fird
+
+
 def P_of(rho_mol, T, x):
-    """Presion [MPa] sin evaluar cp/w (evita NaN dentro de la campana)."""
-    M = Mm(x); ph = _o._phir(rho_mol*M, T, x)
-    Z = 1 + ph["delta"]*ph["fird"]
+    """Presion [MPa] sin evaluar cp/w (evita NaN dentro de la campana).
+
+    Version especializada (Fase 1a): en vez de pedir las 6-7 derivadas del
+    Helmholtz residual que calcula iapws _phir, evalua SOLO fird = dPhi_r/ddelta
+    -- la unica que necesita Z = 1 + delta*fird -- con el mismo orden de
+    operaciones, asi que el valor es identico al del _phir completo."""
+    M = Mm(x)
+    delta, fird = _delta_fird(rho_mol*M, T, x)
+    Z = 1 + delta*fird
     return Z*R_U*T*rho_mol/1000.0
+
+def _newton_salva(g, lo, hi, flo=None, fhi=None):
+    """Newton-Raphson salvaguardado sobre la funcion de residuo g, con raiz
+    acotada en el bracket abierto [lo, hi] (g en MPa, lo que devuelve P_of-P).
+
+    Derivada en diferencias HACIA ADELANTE con paso relativo por rama (un solo
+    g() extra por iteracion). Red de seguridad: cualquier paso invalido (fuera
+    del bracket, salto desproporcionado, residuo que no mejora, valor no
+    finito) deriva a biseccion por signo, que nunca abandona el bracket;
+    agotado el limite combinado de Newton+bisecciones, brentq es el ultimo
+    recurso. Devuelve la raiz con precision equivalente a brentq(xtol=1e-13)
+    con ~4-6 evaluaciones de g en vez de ~15."""
+    if flo is None:
+        flo = g(lo)
+    if fhi is None:
+        fhi = g(hi)
+    if abs(flo) <= 1e-10:
+        return lo
+    if abs(fhi) <= 1e-10:
+        return hi
+    if not (np.isfinite(flo) and np.isfinite(fhi)) or flo*fhi > 0:
+        # Sin cambio de signo (g de un extremo no finito, p.ej. borde de
+        # dominio, o raiz degenerada): mismo brentq que el codigo viejo, que
+        # ya fallaba o convergia aqui segun el caso.
+        return brentq(g, lo, hi, xtol=1e-13, rtol=1e-15)
+    if abs(flo) <= abs(fhi):
+        x0, f0 = lo, flo
+    else:
+        x0, f0 = hi, fhi
+    for _ in range(50):
+        if abs(f0) <= 1e-10:
+            return x0
+        if not np.isfinite(f0):
+            return brentq(g, lo, hi, xtol=1e-13, rtol=1e-15)
+        eps = 1e-8*max(abs(x0), 0.1)
+        f1 = g(x0+eps)
+        if np.isfinite(f1):
+            deriv = (f1-f0)/eps
+            if deriv != 0.0 and np.isfinite(deriv):
+                x1 = x0 - f0/deriv
+                if lo < x1 < hi and abs(x1-x0) <= 0.5*(hi-lo):
+                    if (abs(x1-x0) <= 1e-12*max(abs(x1), 1.0)
+                            and abs(f0) <= 1e-10):
+                        return x1
+                    g1 = g(x1)
+                    if np.isfinite(g1) and abs(g1) < abs(f0):
+                        x0, f0 = x1, g1
+                        continue
+        # Biseccion por signo (red de seguridad).
+        mid = 0.5*(lo+hi)
+        fm = g(mid)
+        if not np.isfinite(fm):
+            return brentq(g, lo, hi, xtol=1e-13, rtol=1e-15)
+        if abs(fm) <= 1e-10:
+            return mid
+        if flo*fm < 0:
+            hi, fhi = mid, fm
+        else:
+            lo, flo = mid, fm
+        if abs(flo) <= abs(fhi):
+            x0, f0 = lo, flo
+        else:
+            x0, f0 = hi, fhi
+    return brentq(g, lo, hi, xtol=1e-13, rtol=1e-15)
 
 def rho_TPx(T, P, x, phase):
     """Raiz de densidad molar [mol/dm3] para (T,P,x). phase 'v' o 'l'."""
@@ -106,7 +276,7 @@ def rho_TPx(T, P, x, phase):
             b *= 1.06
             v = g(b)
             if not np.isfinite(v): b /= 1.06; break
-            if v > 0: return brentq(g, a, b, xtol=1e-13, rtol=1e-15)
+            if v > 0: return _newton_salva(g, a, b, fhi=v)
         raise ValueError(f"sin raiz de vapor: T={T:.2f} P={P:.5g} x={x:.4f}")
     b = 70.0
     while not np.isfinite(g(b)) or g(b) < 0:
@@ -116,7 +286,7 @@ def rho_TPx(T, P, x, phase):
     for _ in range(300):
         a *= 0.97
         v = g(a)
-        if np.isfinite(v) and v < 0: return brentq(g, a, b, xtol=1e-13, rtol=1e-15)
+        if np.isfinite(v) and v < 0: return _newton_salva(g, a, b, flo=v)
         if a < 1.0: break
     raise ValueError(f"sin raiz de liquido: T={T:.2f} P={P:.5g} x={x:.4f}")
 

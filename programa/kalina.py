@@ -158,6 +158,52 @@ def T_sat(P, w, kind):
 _ultimaT = {}     # (P, w, propiedad) -> ultima T resuelta, para acotar el brentq
 
 
+def _newton_salva_T(f, lo, hi, flo, fhi, x0, f0=None):
+    """Newton-Raphson salvaguardado para invertir h o s -> T (estado_de).
+
+    La derivada se estima en diferencias hacia adelante con paso relativo:
+    una sola llamada extra a f() (= estado) por iteracion. Red de seguridad:
+    paso fuera del bracket, salto desproporcionado, residuo que no mejora o
+    valor no finito (p. ej. cruce de cambio de fase) derivan a biseccion por
+    signo; agotado el limite de Newton+bisecciones, brentq es el ultimo
+    recurso. Devuelve la raiz con |paso| <= TOL_T (misma tolerancia que el
+    brentq que reemplaza)."""
+    for _ in range(50):
+        if f0 is None:
+            f0 = f(x0)
+        if not np.isfinite(f0):
+            return brentq(f, lo, hi, xtol=TOL_T)
+        d = 1e-5 * max(abs(x0), 1.0)
+        f1 = f(x0 + d)
+        if np.isfinite(f1):
+            den = f1 - f0
+            if den != 0.0 and np.isfinite(den):
+                x1 = x0 - f0 * d / den
+                if lo < x1 < hi and abs(x1 - x0) <= 0.5 * (hi - lo):
+                    if abs(x1 - x0) <= TOL_T:
+                        return x1
+                    g1 = f(x1)
+                    if np.isfinite(g1) and abs(g1) < abs(f0):
+                        x0, f0 = x1, g1
+                        continue
+        # Biseccion por signo (red de seguridad).
+        mid = 0.5 * (lo + hi)
+        fm = f(mid)
+        if not np.isfinite(fm):
+            return brentq(f, lo, hi, xtol=TOL_T)
+        if fm == 0.0:
+            return mid
+        if flo * fm < 0:
+            hi, fhi = mid, fm
+        else:
+            lo, flo = mid, fm
+        if abs(flo) <= abs(fhi):
+            x0, f0 = lo, flo
+        else:
+            x0, f0 = hi, fhi
+    return brentq(f, lo, hi, xtol=TOL_T)
+
+
 def estado_de(P, w, h=None, s=None):
     """Inversion: estado a (P, w) con h o s prescrita. h y s crecen con T.
 
@@ -198,7 +244,11 @@ def estado_de(P, w, h=None, s=None):
     if flo > 0 or fhi < 0:
         raise RuntimeError(f"{nombre}={val:.6g} fuera de dominio a "
                            f"P={P:.5g} MPa, w={w:.4f}")
-    T = brentq(f, lo, hi, xtol=TOL_T)
+    if T0 is not None and lo <= T0 <= hi:
+        x0, f0 = T0, None
+    else:
+        x0, f0 = (lo, flo) if abs(flo) <= abs(fhi) else (hi, fhi)
+    T = _newton_salva_T(f, lo, hi, flo, fhi, x0, f0)
     _ultimaT[k] = T
     return estado(T, P, w)
 

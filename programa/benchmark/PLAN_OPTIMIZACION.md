@@ -41,6 +41,51 @@ caso, que en el perfil eran ~7 % (0.30 s propio + 2.8 s acumulado): NO el 73 %
 (ese % es el CUERPO de `_phir`, al que las instancias constantes no afectan —
 la estimacion original del plan confundio ambos).
 
+## Resultado (fases 3-4 implementadas, 2026-09-15)
+
+Baseline de esta sesion (post fases 1-2, misma maquina): A_elsayed FRIO 22.4 s;
+`pytest -m "not lento"` 7.16 s; `pytest -m lento` 238.3 s (2 verdes); P_of por
+caso 55 283; brentq por caso 3 354; `validacion_g4_01.py` byte-identico.
+
+| Metrica | Fases 1-2 | +Fase 3 | +Fases 3-4 |
+|---|---:|---:|---:|
+| A_elsayed FRIO (bench pared) | 22.4 s | 23.5 s | **18.8 s (-16 %)** |
+| A_elsayed vecino (h1_semilla) | 20.3 s | 19.9 s | **16.8 s (-17 %)** |
+| A_elsayed caliente | 5.3 s | 6.5 s | 5.4 s |
+| pared total (frio+diag+caliente+vecino) | 66.1 s | 68.6 s | **60.9 s (-8 %)** |
+| llamadas brentq (scipy) por caso | 3 354 | 39 | **4** |
+| llamadas P_of por caso | 55 283 | 57 599 | **45 396 (-18 %)** |
+| llamadas rho_TPx por caso | 3 316 | 3 503 | **2 734** |
+| llamadas estado() por caso | 386 | 386 | **316** |
+| llamadas MEoS._phir (puros) por caso | 117 962 | 122 970 | **96 994 (-18 %)** |
+| `pytest -m "not lento"` | 7.16 s | 5.17 s | 5.36 s (-25 %) |
+| `pytest -m lento` (2 ciclos frios) | 238.3 s | 246.3 s | **215.0 s (-10 %)** |
+
+`validacion_g4_01.py` queda BYTE-IDENTICO al baseline (max_dev 3.85e-03 %).
+Fixtures de ciclo regenerados dos veces (fase 3 y fase 4); `git diff` mostro
+solo cifras finas (max desviacion relativa 3.6e-09 en A_elsayed, 1.3e-09 en
+B_base, frente al criterio 1e-5) y fecha de metadata; `motor.json` NO se
+regenero (la red rapida quedo verde en las dos fases). `etiqueta` (VALIDO) y
+`violados` sin cambios.
+
+### Lectura honesta de la medicion
+
+- **Fase 3 (Newton en rho_TPx) es casi NEUTRA en pared para el ciclo**: la
+  premisa del plan ("~12-17 evaluaciones de brentq por raiz") NO se cumple.
+  Sobre estas funciones monotonas brentq hace ~7.5 evals/raiz, y el costo real
+  lo domina la busqueda de bracket (expansiones *1.06/*0.97): 9.2 evals/raiz
+  de media. El Newton salvaguardado gasta ~7.3 evals/raiz en el apriete
+  (2 evals por iteracion + evaluacion del extremo): empate tecnico con brentq.
+  Su beneficio CONCRETO: saca a scipy brentq del hot path (3 354 -> 4 llamadas)
+  y acelera el suite rapido del motor (7.2 -> 5.2 s, -25 %).
+- **Fase 4 (Newton en estado_de) es LA ganancia**: estado_de baja de ~11-12
+  `estado()` por inversion a ~5 (2-3 iteraciones de Newton con c_p efectiva).
+  Eso recorta 316 vs 386 `estado()`, 2 734 vs 3 316 raices rho_TPx y el P_of
+  total un 18 %. Traduccion en pared: FRIO -16 %, vecino -17 %, lento -10 %.
+- Efecto colateral medido: la perturbacion de convergencia (~1e-10) cambia las
+  rutas de fsolve del flash y, en la medicion SOLO fase 3, subio P_of total
+  (+4 %) frente al baseline; con fase 4 el neto quedo globalmente -18 %.
+
 Nota de reproducibilidad: el caso B_base (degenerado, cerca del locus critico
 donde el flash se estanca) NO es bit-reproducible entre corridas (~1e-10..1e-11
 relativo). Se comprobo que regenerando B_base con el codigo ORIGINAL tampoco se
@@ -48,6 +93,54 @@ reproduce su fixture previo: el ruido es run-to-run preexistente de la maquina,
 no un efecto de estas fases. Dos corridas del MISMO codigo nuevo dan el mismo
 fixture (solo cambia la fecha de la metadata). Toda la red usa
 rtol=atol=1e-7, varias ordenes por encima del ruido.
+
+## Resultado (fase 1a implementada, 2026-09-16)
+
+`P_of` especializado que evalua SOLO `fird = dPhi_r/ddelta` de los puros y del
+termino de mezcla (en vez de las 6-7 derivadas de `iapws _phir`). Mismo orden
+de operaciones que el original: verificado BIT-IDENTICO en 20 000 barridos de
+(rho, T, x). La fisica no se toca: `validacion_g4_01.py` da el mismo
+`max_dev = 3.85e-03 %` y `pytest -m lento` pasa SIN regenerar fixtures.
+
+| Metrica | Fases 3-4 | +Fase 1a | Delta |
+|---|---:|---:|---:|
+| A_elsayed FRIO (bench pared) | 18.8 s | **4.8 s** | **-75 %** |
+| A_elsayed caliente | 5.4 s | **1.2 s** | -78 % |
+| A_elsayed vecino (h1_semilla) | 16.8 s | **4.1 s** | **-76 %** |
+| B_base FRIO | ~107 s (2015 lento/2) | **46.8 s** | **-80 %** |
+| B_base vecino | ~87 s | **34.3 s** | -61 % |
+| diagnostico (criterios+supuestos) | 19.1 s | **3.8 s** | -80 % |
+| `pytest -m "not lento"` | 5.36 s | **2.19 s** | -59 % |
+| `pytest -m lento` (2 ciclos frios) | 215.0 s | **59.0 s** | **-73 %** |
+| llamadas MEoS._phir (puros) por caso | 96 994 | **6 202** | -94 % |
+| % del perfil en MEoS._phir (propio) | 76.1 % | **20.7 %** | |
+| perfilado total (A_elsayed) | 26.2 s | **6.3 s** | -76 % |
+
+Reparto post-implementacion (cProfile, A_elsayed frio): `fird` puro propio
+42.9 %; `MEoS._phir` (ya solo desde `prop()`) 20.7 %; `_fird_departure` 8.1 %;
+`math.exp` 6.9 %. El antiguo monstruo (70+ %) quedo reducido a 1/4.
+
+Cambios (todos en `nh3h2o.py`): `_mk_fird_puro()` genera el `fird` podado de
+cada puro desde sus `_constants` (IAPWS-95 con polinomios+exp+gaussiano+no
+analitico; NH3 solo polinomio+exp); `_fird_departure()` replica el `fird` del
+termino de mezcla de `_Dphir` (misma tabla de coeficientes, mismo orden);
+`_delta_fird()` combina (1-x)·fird_agua + x·fird_amon + fird_mezcla; `P_of`
+lo consume. Se importa `math.exp` a nivel de modulo (bits identicos a
+`numpy.exp`, medido).
+
+Nota de atribucion honesta: con la capa de propiedades ~4x mas barata, el
+reparto se achato. El otro hot path es ahora la SECUENCIA de llamadas
+(flash→F→rho_TPx→P_of): sus cuentas por caso NO cambiaron (45 396 P_of,
+2 734 prop), solo el costo unitario. Para bajar MAS por caso hay que bajar el
+NUMERO de evaluaciones: Jacobiano explicito en flash_TP (fase 2a) para
+fsolve -> menos F por flash, y semilla interpolada (2b). Para un barrido de
+muchos ciclos, la palanca ortogonal es paralelizar la rejilla en K procesos
+worker_lote (doc 09, no implementado aun).
+
+Dato de barrido: B_base vecino sigue costando 34.3 s (solo -61 % vs 2015):
+en un barrido con T_f creciente casi ningun flash acierta el cache (que
+guarda por T exacta) y cada caso paga la inversion completa. La mejora de
+vecino es promesa de 2a/2b, no de la capa de propiedades.
 
 ## Estrategia
 
@@ -108,7 +201,13 @@ Plan:
 Esperado: ahorra la primera evaluacion del perfil del HRVG (~1-2 s? medir).
 Ademas hace que los fixtures de ciclo no regen por cada cambio en el perfil.
 
-## Fase 3 — 1c: Newton salvaguardado en `rho_TPx`
+## Fase 3 — 1c: Newton salvaguardado en `rho_TPx` — HECHA
+
+> Nota post-implementacion: la ganancia esperada NO aparece en pared (el ciclo
+> quedo neutro; ver tablas de arriba) porque brentq ya convergia en ~7.5
+> evals/raiz sobre estas funciones monotonas y el bracket domina (~9.2 evals).
+> El Newton salvaguardado elimina igual el brentq del camino caliente
+> (3 354 -> 4 llamadas) y acelera el suite rapido del motor.
 
 `nh3h2o.py` lineas 89-111: el bubbleo de densidad (raiz de P(rho)=P dada, con
 arbitrario de fase) usa `_bracket_log` + `brentq`, ~17 evaluaciones de P_of
@@ -122,20 +221,35 @@ ruido numerico (< 1e-5), es aceptable regenerar SOLO tras validar que
 `validacion_g4_01.py` da el mismo max_dev. Documentar la desviacion maxima
 observada entre brentq y Newton en un barrido de (T, P, w).
 
-## Fase 4 — 3a: Newton con c_p en `estado_de`
+## Fase 4 — 3a: Newton con c_p en `estado_de` — HECHA
+
+> Nota post-implementacion: es la fase que entrega el grueso de la ganancia.
+> `estado_de` pasa de ~11-12 `estado()` por inversion a ~5; recorta FRIO de
+> 22.4 a 18.8 s (-16 %), vecino de 20.3 a 16.8 s (-17 %) y el lento de 238 a
+> 215 s (-10 %). Implementacion: `_newton_salva_T` (kalina.py), mismo contrato
+> de salvaguardas que la Fase 3; x0 = ultima T de `_ultimaT` si cae en el
+> bracket, si no el extremo de menor residuo; convergencia |ΔT| <= TOL_T.
 
 `kalina.py` lineas 161-203: invierte h(T) → T con brentq y bracket expandido
 (~12 evaluaciones de `estado()`). Reemplazarlo por Newton salvaguardado que
 arranca con la derivada c_p = ∂h/∂T estimada por `estado(T+δ)` (una sola
 evaluacion extra por iteracion). Mismo criterio que Fase 3.
 
-## Fase 5 — (fuera de alcance por ahora) 1a/2a
+## Fase 1a — `P_of` especializado (solo fird) — HECHA
 
-- 1a: `P_of` especializado que calcule solo fir/fird/firdd/firx (lo que usan
-  los solvers) sin firt/firtt/firdt. Ganancia ~4x adicional sobre P_of.
-- 2a: Jacobiano analitico en el flash_TP para resolver el par (xL, xV).
+> Implementada 2026-09-16. `P_of` ahora evalua solo `dPhi_r/ddelta` de los
+> puros (`_mk_fird_puro`, podando MEoS._phir) y del termino de mezcla
+> (`_fird_departure`, podando _Dphir), con el mismo orden de operaciones
+> (BIT-IDENTICO en 20 000 barridos). FRIO 18.8 -> 4.8 s (A), 107 -> 46.8 s
+> (B, -80 %); MEoS._phir baja de 96 994 a 6 202 llamadas/caso. Resultado
+> completo en la seccion "Resultado (fase 1a implementada, 2026-09-16)".
 
-Se delegan despues si las fases 1-4 no llegan al objetivo (caso ~5 s).
+## Fase 5 — (fuera de alcance por ahora) 2a
+
+- 2a: Jacobiano analitico en `flash_TP` (Newton 2x2 explicito o Jacobiano
+  via derivacion implicita de rho_TPx) para resolver el par (xL, xV).
+  fsolve hoy hace ~4 evaluaciones de F por flash; un Newton con semilla
+  interpolada (2b) podria bajar a ~2. Es la siguiente palanca por caso.
 
 ## Protocolo de verificacion obligatorio (en cada fase)
 
